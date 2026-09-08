@@ -6,6 +6,7 @@ import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -34,7 +35,7 @@ class CoalescingCacheTest {
     }
 
     @Test
-    fun `old fetch completion cannot remove a newer pending request`() = runTest {
+    fun `cancellation starts a replacement request that survives old fetch completion`() = runTest {
         val fetchGates = Channel<CompletableDeferred<String>>(Channel.UNLIMITED)
         var fetchCount = 0
         val cache = CoalescingCache<String, String>(
@@ -50,11 +51,23 @@ class CoalescingCacheTest {
             cache.getOrFetch(KEY, forceRefresh = true)
         }
         val oldGate = fetchGates.receive()
-        cache.cancelPending()
-
-        val newFetch = async(start = CoroutineStart.UNDISPATCHED) {
+        val cancelledWaiter = async(UnconfinedTestDispatcher(testScheduler)) {
             cache.getOrFetch(KEY, forceRefresh = true)
         }
+        val laterCall = CompletableDeferred<Deferred<String>>()
+        cancelledWaiter.invokeOnCompletion {
+            laterCall.complete(
+                async(start = CoroutineStart.UNDISPATCHED) {
+                    cache.getOrFetch(KEY, forceRefresh = true)
+                },
+            )
+        }
+
+        cache.cancelPending()
+
+        assertTrue(cancelledWaiter.isCancelled)
+        val newFetch = laterCall.await()
+        assertFalse(newFetch.isCancelled)
         val newGate = fetchGates.receive()
 
         oldGate.complete("old")
@@ -70,45 +83,6 @@ class CoalescingCacheTest {
         assertEquals("new", newFetch.await())
         assertEquals("new", newWaiter.await())
         assertEquals(2, fetchCount)
-    }
-
-    @Test
-    fun `cancelling pending work removes it before a cancelled waiter starts a new request`() = runTest {
-        val fetchGates = Channel<CompletableDeferred<String>>(Channel.UNLIMITED)
-        val cache = CoalescingCache<String, String>(
-            fetch = {
-                val gate = CompletableDeferred<String>()
-                fetchGates.send(gate)
-                gate.await()
-            },
-        )
-
-        val oldFetch = async(start = CoroutineStart.UNDISPATCHED) {
-            cache.getOrFetch(KEY, forceRefresh = true)
-        }
-        val oldGate = fetchGates.receive()
-        val cancelledWaiter = async(start = CoroutineStart.UNDISPATCHED) {
-            cache.getOrFetch(KEY, forceRefresh = true)
-        }
-        val laterCall = CompletableDeferred<Deferred<String>>()
-        cancelledWaiter.invokeOnCompletion {
-            laterCall.complete(
-                async(start = CoroutineStart.UNDISPATCHED) {
-                    cache.getOrFetch(KEY, forceRefresh = true)
-                },
-            )
-        }
-
-        cache.cancelPending()
-
-        val newFetch = laterCall.await()
-        assertFalse(newFetch.isCancelled)
-        val newGate = fetchGates.receive()
-
-        oldGate.complete("old")
-        assertEquals("old", oldFetch.await())
-        newGate.complete("new")
-        assertEquals("new", newFetch.await())
     }
 
     private companion object {
