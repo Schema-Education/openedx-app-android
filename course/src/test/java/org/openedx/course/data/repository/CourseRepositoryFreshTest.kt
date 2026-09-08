@@ -689,6 +689,10 @@ class CourseRepositoryFreshTest {
         return HttpException(Response.error<CourseStructureModel>(statusCode, body))
     }
 
+    /**
+     * Snapshots data when a read starts and uses CompletableDeferred gates to pause reads or inserts.
+     * Models operation ordering, not real Room transactions or HTTP behavior.
+     */
     private class GatedCourseDao : CourseDao {
         data class Gate(
             val started: CompletableDeferred<Unit> = CompletableDeferred(),

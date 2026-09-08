@@ -34,7 +34,7 @@ class CoalescingCacheTest {
     }
 
     @Test
-    fun `cancelled fetch cannot remove a newer pending request`() = runTest {
+    fun `old fetch completion cannot remove a newer pending request`() = runTest {
         val fetchGates = Channel<CompletableDeferred<String>>(Channel.UNLIMITED)
         var fetchCount = 0
         val cache = CoalescingCache<String, String>(
