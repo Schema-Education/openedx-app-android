@@ -391,8 +391,8 @@ class CourseRepositoryFreshTest {
     }
 
     /**
-     * Snapshots data when a read starts and uses CompletableDeferred gates to pause reads or inserts.
-     * Models operation ordering, not real Room transactions or HTTP behavior.
+     * Captures the stored value before pausing a read. Tests use [CompletableDeferred] to control
+     * when reads and inserts finish. This fake does not simulate Room transactions or HTTP behavior.
      */
     private class GatedCourseDao : CourseDao {
         data class Gate(

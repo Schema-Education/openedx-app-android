@@ -32,8 +32,9 @@ import java.util.concurrent.atomic.AtomicLong
 /**
  * Repository for course data with request coalescing.
  *
- * When multiple callers request the same data simultaneously,
- * only one network request is made and all callers receive the same result.
+ * Concurrent requests share work within each cache. Course-structure requests are grouped by
+ * course and session, with explicit refreshes kept separate from requests through
+ * [getCourseStructureFlow].
  */
 @Suppress("TooManyFunctions")
 class CourseRepository(
@@ -55,8 +56,8 @@ class CourseRepository(
     )
 
     /**
-     * Holds the course structure and local Room record returned by one request that does not require
-     * a refresh.
+     * Holds the course structure and local Room record returned by a request through
+     * [getCourseStructureFlow].
      *
      * If an explicit refresh saves newer course structure while this request is running,
      * [returnedCourseStructure] is replaced with that newer cached value. The Flow then does not
@@ -74,11 +75,10 @@ class CourseRepository(
     /**
      * Holds the course structure and local Room record returned by one explicit refresh request.
      *
-     * They stay together until saved, so a later response cannot pair one response's structure with
-     * another response's database record.
+     * Keeping both representations together prevents saving a database record from a different
+     * response.
      */
     private data class FreshFetchResult(
-        val capturedSessionGeneration: Long,
         val courseStructure: CourseStructure,
         val roomEntity: CourseStructureEntity,
     )
@@ -93,23 +93,22 @@ class CourseRepository(
     private val sessionGeneration = AtomicLong(0)
 
     /**
-     * Holds one `Mutex`, a coroutine-safe lock, for each course.
+     * Holds one `Mutex` per course so the following operations run one at a time.
      *
-     * The mutex makes four operations take turns: saving a normal response; saving a refresh
-     * response; placing a database result in memory cache for a Flow; and placing one in memory
-     * cache for a cache-only read.
+     * This covers saving responses from [getCourseStructureFlow], saving explicit refresh
+     * responses, and adding Room results to memory from either a Flow or a cache-only read.
      *
-     * The mutex remains after a session ends because an older database write may already hold it.
-     * A later session's write waits for that write to finish, then becomes the final stored value.
+     * Keep the same mutex after a session ends: an old write may still hold it. A new session's
+     * write must wait for that write to finish so the old value cannot overwrite the new value.
      */
     private val courseWriteMutexes = ConcurrentHashMap<String, Mutex>()
 
     /**
      * Counts refresh responses saved for each course and session.
      *
-     * A request that does not require a refresh remembers this count before fetching data. If the
-     * count changes before that request finishes, a refresh saved newer data first, so the older
-     * result is not stored or returned.
+     * A request through [getCourseStructureFlow] captures this count before fetching data. If the
+     * count changes before that request finishes, an explicit refresh saved newer data first, so
+     * the older result is not stored or returned.
      */
     private val freshCompletionVersion = ConcurrentHashMap<CourseSessionKey, AtomicLong>()
 
@@ -173,7 +172,7 @@ class CourseRepository(
     )
 
     /**
-     * Keeps explicit refresh requests separate from normal requests.
+     * Keeps explicit refresh requests separate from requests through [getCourseStructureFlow].
      *
      * The two paths send different `Cache-Control` headers and must not share a response, so they
      * use separate `CoalescingCache` instances.
@@ -188,7 +187,6 @@ class CourseRepository(
                 courseId,
             )
             FreshFetchResult(
-                capturedSessionGeneration = courseSessionKey.sessionGeneration,
                 courseStructure = response.mapToDomain(),
                 roomEntity = response.mapToRoomEntity(),
             )
@@ -210,7 +208,6 @@ class CourseRepository(
             needsRefresh.remove(courseSessionKey)
         },
         autoCache = false,
-        activeGeneration = { sessionGeneration.get() },
     )
 
     private val statusCache = CoalescingCache<String, CourseComponentStatus>(
@@ -250,7 +247,6 @@ class CourseRepository(
         structureCache.cancelPending()
         freshStructureCache.cancelPending()
         structureCache.clear()
-        freshStructureCache.clear()
         statusCache.clear()
         datesCache.clear()
         progressCache.clear()
@@ -537,10 +533,10 @@ class CourseRepository(
     }
 
     /**
-     * Runs [block] while holding this course's `Mutex`.
+     * Runs [block] while holding this course's `Mutex`, provided the session is still current.
      *
-     * If the course session ends while the call is waiting for the mutex, [block] does not run and
-     * this function returns null.
+     * After acquiring the mutex, returns null without running [block] if [capturedGeneration]
+     * no longer matches the current session.
      */
     private suspend fun <R> runUnderCourseWriteGuard(
         courseId: String,
@@ -560,8 +556,8 @@ class CourseRepository(
      * Decides whether course structure read from the local Room database may be added to memory
      * cache.
      *
-     * If an explicit refresh saved newer course structure while Room was being read, returns that
-     * newer cached structure instead. Otherwise, caches and returns the Room result.
+     * Returns an existing memory value when available. Otherwise, caches and returns the Room
+     * result only if no explicit refresh completed while Room was being read.
      */
     private fun resolveStructureFromRoom(
         courseId: String,

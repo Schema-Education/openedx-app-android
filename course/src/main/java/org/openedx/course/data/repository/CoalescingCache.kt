@@ -4,10 +4,10 @@ import kotlinx.coroutines.CompletableDeferred
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * A cache with request coalescing support.
+ * Stores cached values and shares fetches for the same key.
  *
- * When multiple callers request the same data simultaneously,
- * only one fetch operation is performed and all callers receive the same result.
+ * If a caller needs to fetch a value and another fetch for that key is already running,
+ * it waits for that result instead of starting a duplicate request.
  *
  * @param K the type of cache keys
  * @param V the type of cached values
@@ -32,9 +32,9 @@ class CoalescingCache<K, V>(
     private val pending = ConcurrentHashMap<K, CompletableDeferred<V>>()
 
     /**
-     * Returns the cached value for [key], or null when no usable value is cached.
+     * Returns the cached value for [key], or null if no value is stored.
      *
-     * When [activeGeneration] is set, a value saved under a different version is not usable.
+     * When [activeGeneration] is set, also returns null if the stored version is no longer current.
      */
     fun getCached(key: K): V? {
         val entry = cache[key] ?: return null
@@ -96,12 +96,11 @@ class CoalescingCache<K, V>(
     }
 
     /**
-     * Stops waiting callers from sharing requests that were pending when this method began.
+     * Removes pending request entries and cancels callers waiting for their results.
      *
-     * It removes each recorded request before cancelling callers waiting for it, so a caller that
-     * resumes can start a new request. A fetch that already started can still finish. When it does,
-     * it removes a pending request only if that request still belongs to it, not a newer request
-     * for the same key.
+     * Remove each entry before cancellation so a waiting caller can start a replacement request
+     * from its cancellation callback. Fetches already running can still finish. Their cleanup
+     * removes only their own entry, preserving any replacement request for the same key.
      */
     fun cancelPending() {
         val pendingSnapshot = HashMap(pending)

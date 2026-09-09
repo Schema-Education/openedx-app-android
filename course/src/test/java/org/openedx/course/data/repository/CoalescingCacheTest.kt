@@ -51,6 +51,7 @@ class CoalescingCacheTest {
             cache.getOrFetch(KEY, forceRefresh = true)
         }
         val oldGate = fetchGates.receive()
+        // Start a new request while the waiting caller is being cancelled to verify it survives cancellation.
         val cancelledWaiter = async(UnconfinedTestDispatcher(testScheduler)) {
             cache.getOrFetch(KEY, forceRefresh = true)
         }
